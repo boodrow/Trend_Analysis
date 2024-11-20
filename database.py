@@ -112,7 +112,7 @@ def fetch_data(engine, table_name, last_processed_timestamp=None, limit=None):
             query = text(f"{query.text} LIMIT :limit")
             params['limit'] = limit
 
-        df = pd.read_sql(query, engine, params=params)
+        df = pd.read_sql(query, engine, params=params, parse_dates=['timestamp'])
         logger.info(f"Fetched {len(df)} new records from {table_name}.")
         return df
     except Exception as e:
@@ -151,6 +151,7 @@ def ensure_columns(engine, table_name, columns):
 def update_trends(engine, table_name, df):
     """
     Bulk update the 'trend' and 'predicted_close' columns in the database based on the DataFrame.
+    Expects 'timestamp' as a column in df.
     """
     try:
         if not {'trend', 'predicted_close', 'timestamp'}.issubset(df.columns):
@@ -162,12 +163,20 @@ def update_trends(engine, table_name, df):
             logger.info(f"No 'trend' or 'predicted_close' data to update for {table_name}.")
             return
         # Convert 'timestamp' to string if necessary
-        if df_to_update['timestamp'].dtype == 'datetime64[ns]':
+        if df_to_update['timestamp'].dtype == 'datetime64[ns, UTC]':
+            df_to_update['timestamp'] = df_to_update['timestamp'].dt.tz_convert(None).astype(str)
+        elif df_to_update['timestamp'].dtype == 'datetime64[ns]':
             df_to_update['timestamp'] = df_to_update['timestamp'].astype(str)
         with engine.begin() as conn:
             # Create a temporary table
             conn.execute(text("DROP TABLE IF EXISTS temp_trends"))
-            conn.execute(text("CREATE TEMPORARY TABLE temp_trends (timestamp TEXT, trend TEXT, predicted_close REAL)"))
+            conn.execute(text("""
+                CREATE TEMPORARY TABLE temp_trends (
+                    timestamp TEXT,
+                    trend TEXT,
+                    predicted_close REAL
+                )
+            """))
             # Insert data into temporary table
             df_to_update.to_sql('temp_trends', conn, if_exists='append', index=False)
             # Update the original table using the temporary table

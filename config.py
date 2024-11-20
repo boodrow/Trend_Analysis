@@ -22,7 +22,7 @@ WEB_APP = {
     'PORT': 8050,
 }
 
-NUM_DAYS_BACK = 1
+NUM_DAYS_BACK = 90
 
 GLOBAL_VARIABLES = {
     'LAST_PROCESSED_TIMESTAMP': {
@@ -38,11 +38,11 @@ GLOBAL_VARIABLES = {
 }
 
 TREND_PARAMETERS = {
-    '1S': {'window_size': 20},
-    '1M': {'window_size': 10},
-    '5M': {'window_size': 10},
-    '15M': {'window_size': 10},
-    '30M': {'window_size': 5},
-    '1H': {'window_size': 5},
-    '1D': {'window_size': 5}
+    '1S': {'short_window': 5, 'long_window': 20},
+    '1M': {'short_window': 10, 'long_window': 50},
+    '5M': {'short_window': 10, 'long_window': 50},
+    '15M': {'short_window': 10, 'long_window': 50},
+    '30M': {'short_window': 5, 'long_window': 20},
+    '1H': {'short_window': 5, 'long_window': 20},
+    '1D': {'short_window': 5, 'long_window': 20},
 }

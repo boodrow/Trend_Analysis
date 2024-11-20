@@ -19,8 +19,10 @@ from database import (
     ensure_columns
 )
 
+
 torch.set_num_threads(1)
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
 
 def process_table(engine, table_name, frequency, full_refresh=False):
     """
@@ -86,7 +88,7 @@ def process_table(engine, table_name, frequency, full_refresh=False):
                 lower_table_name = TABLE_NAMES.get(lower_frequency)
                 if lower_table_name:
                     logger.debug(f"Fetching lower frequency trend data from {lower_frequency}")
-                    lower_df = fetch_lower_frequency_data(engine, lower_table_name, df['timestamp'].min(), df['timestamp'].max())
+                    lower_df = fetch_lower_frequency_data(engine, lower_table_name, df.index.min(), df.index.max())
                     if not lower_df.empty:
                         lower_freq_data = lower_df
                         logger.info(f"Fetched {len(lower_df)} records of lower frequency data for {frequency}.")
@@ -111,9 +113,8 @@ def process_table(engine, table_name, frequency, full_refresh=False):
 
         # Update the last processed timestamp only if not performing full refresh
         if not full_refresh:
-            latest_record = df.iloc[-1]
-            if 'timestamp' in latest_record:
-                new_last_timestamp = latest_record['timestamp']
+            if 'timestamp' in df.columns and not df['timestamp'].isnull().all():
+                new_last_timestamp = df['timestamp'].max()
                 logger.info(f"Updated last processed timestamp for {frequency}: {new_last_timestamp}")
                 update_last_processed_timestamp(engine, frequency, new_last_timestamp)
             else:
@@ -123,6 +124,7 @@ def process_table(engine, table_name, frequency, full_refresh=False):
     except Exception as e:
         logger.error(f"Error processing table {table_name}: {e}")
         return pd.DataFrame()
+
 
 def get_lower_frequency(frequency):
     """
@@ -138,6 +140,7 @@ def get_lower_frequency(frequency):
     except ValueError:
         return None
 
+
 def fetch_lower_frequency_data(engine, table_name, start_time, end_time):
     """
     Fetch lower frequency trend data between start_time and end_time.
@@ -145,11 +148,21 @@ def fetch_lower_frequency_data(engine, table_name, start_time, end_time):
     query = f"""
         SELECT timestamp, trend, predicted_close
         FROM {table_name}
-        WHERE timestamp BETWEEN '{start_time}' AND '{end_time}'
+        WHERE timestamp BETWEEN :start_time AND :end_time
         ORDER BY timestamp ASC
     """
-    df = pd.read_sql(query, engine)
-    return df
+    try:
+        df = pd.read_sql(query, engine, params={'start_time': start_time, 'end_time': end_time}, parse_dates=['timestamp'])
+        if 'timestamp' in df.columns:
+            df.set_index('timestamp', inplace=True)
+        else:
+            logger.error("Lower frequency DataFrame does not contain 'timestamp' column.")
+            return pd.DataFrame()
+        return df
+    except Exception as e:
+        logger.error(f"Error fetching lower frequency data from {table_name}: {e}")
+        return pd.DataFrame()
+
 
 def main():
     try:
@@ -179,5 +192,8 @@ def main():
             logger.debug(f"Finished processing table {table} for frequency {freq}")
         time.sleep(60)  # Wait for 60 seconds before next iteration
 
+
 if __name__ == '__main__':
+    # Ensure model directory exists
+    os.makedirs('models', exist_ok=True)
     main()
