@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Trend Detection Dashboard</title>
+    <!-- Include Bootstrap for basic styling (optional) -->
+    <link
+      rel="stylesheet"
+      href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css"
+      integrity="sha384-MCw98/SFnGE8fJT3GXwEOngsV7Zt27NXFoaoApmYm81iuXoPkFOJwJ8ERdknLPMO"
+      crossorigin="anonymous"
+    >
+    <!-- Custom CSS (optional) -->
+    <link rel="stylesheet" href="/static/styles.css">
+    {%metas%}
+    {%css%}
+</head>
+<body>
+    <div class="container">
+        <h1 class="mt-4 mb-4">AI Trend Detection Dashboard</h1>
+        <!-- Dash app will be injected here -->
+        {%app_entry%}
+    </div>
+    <footer>
+        <!-- Dash configuration and scripts -->
+        {%config%}
+        {%scripts%}
+        {%renderer%}
+    </footer>
+</body>
+</html>

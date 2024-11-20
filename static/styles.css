@@ -1,0 +1,16 @@
+/* styles.css
+
+/* Example: Center the header and add some padding */
+h1 {
+    text-align: center;
+    color: #333;
+}
+
+/* Style for the log textarea */
+#log-area {
+    background-color: #f8f9fa;
+    font-family: monospace;
+    resize: none;
+}
+
+/* Additional custom styles can be added here */

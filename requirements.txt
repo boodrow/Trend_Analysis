@@ -1,0 +1,12 @@
+pandas
+numpy
+sqlalchemy
+psycopg2-binary
+dash
+flask
+plotly
+torch
+scikit-learn
+ta
+urllib3
+tqdm
