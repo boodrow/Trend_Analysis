@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 import warnings
 from trend_calculator import detect_trends
-from config import TABLE_NAMES, TREND_PARAMETERS
+from config import TABLE_NAMES, TREND_PARAMETERS, NUM_OF_EPOCHS
 from logger import logger
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader
@@ -121,7 +121,7 @@ def process_and_train(data, model_dir='.'):
 
             # Train model
             logger.info(f"Training model for frequency '{freq}'.")
-            train_model(model, train_loader, val_loader, model_path, epochs=20, device=device, early_stopping_patience=5)
+            train_model(model, train_loader, val_loader, model_path, epochs=NUM_OF_EPOCHS, device=device, early_stopping_patience=5)
 
             logger.info(f"Model training completed for frequency '{freq}'. Model saved to '{model_path}'.")
 

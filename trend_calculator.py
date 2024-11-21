@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler
 from logger import logger
-from config import TREND_PARAMETERS
+from config import TREND_PARAMETERS, NUM_OF_EPOCHS
 from tqdm import tqdm
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
@@ -61,7 +61,7 @@ def calculate_technical_indicators(df):
     return df
 
 
-def train_model(model, train_loader, val_loader, model_path, epochs=20, device='cpu', early_stopping_patience=5):
+def train_model(model, train_loader, val_loader, model_path, epochs=NUM_OF_EPOCHS, device='cpu', early_stopping_patience=5):
     """
     Train the model and save the best performing model based on validation loss.
     """
