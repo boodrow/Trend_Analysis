@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 import warnings
 from trend_calculator import detect_trends
-from config import TABLE_NAMES, TREND_PARAMETERS, NUM_OF_EPOCHS
+from config import TABLE_NAMES, TREND_PARAMETERS, NUM_OF_EPOCHS, EARLY_STOPPING_PATIENCE
 from logger import logger
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader
@@ -105,8 +105,19 @@ def process_and_train(data, model_dir='.'):
             train_loader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=0)
             val_loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=0)
 
-            # Initialize model
-            model = LSTMModelWithAttention(input_size=len(feature_columns)).to(device)
+            # Initialize model with increased complexity
+            base_num_layers = TREND_PARAMETERS.get(freq, {}).get('num_layers', 2)
+            base_hidden_size = TREND_PARAMETERS.get(freq, {}).get('hidden_size', 128)
+            base_num_transformer_layers = TREND_PARAMETERS.get(freq, {}).get('num_transformer_layers', 2)
+
+            model = LSTMModelWithAttention(
+                input_size=len(feature_columns),
+                hidden_size=base_hidden_size * 10,  # Increased by 10x
+                num_layers=base_num_layers * 10,      # Increased by 10x
+                num_transformer_layers=base_num_transformer_layers * 10,  # Increased by 10x
+                dropout=0.3,
+                bidirectional=True
+            ).to(device)
 
             # Use multiple GPUs if available
             if torch.cuda.device_count() > 1:
@@ -119,16 +130,23 @@ def process_and_train(data, model_dir='.'):
             model_filename = f"lstm_model_{freq}.pt"
             model_path = os.path.join(model_dir, model_filename)
 
-            # Train model
+            # Train model with dynamic learning rate and increased early stopping
             logger.info(f"Training model for frequency '{freq}'.")
-            train_model(model, train_loader, val_loader, model_path, epochs=NUM_OF_EPOCHS, device=device, early_stopping_patience=5)
+            train_model(
+                model,
+                train_loader,
+                val_loader,
+                model_path,
+                epochs=NUM_OF_EPOCHS,
+                device=device,
+                early_stopping_patience=EARLY_STOPPING_PATIENCE,
+                dynamic_lr=True  # Enable dynamic learning rate
+            )
 
             logger.info(f"Model training completed for frequency '{freq}'. Model saved to '{model_path}'.")
 
         except Exception as e:
             logger.error(f"Error processing and training for frequency '{freq}': {e}")
-
-    logger.info("All model trainings completed.")
 
 def main():
     """

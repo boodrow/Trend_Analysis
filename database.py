@@ -66,7 +66,7 @@ def get_last_processed_timestamp(engine, frequency):
         with engine.connect() as connection:
             result = connection.execute(query, {'frequency': frequency}).fetchone()
             if result:
-                return result[0]  # Access by index instead of key
+                return result[0]
             else:
                 return None
     except Exception as e:
@@ -92,20 +92,36 @@ def update_last_processed_timestamp(engine, frequency, timestamp):
         logger.error(f"Error updating last processed timestamp for {frequency}: {e}")
 
 
-def fetch_data(engine, table_name, last_processed_timestamp=None, limit=None):
+def fetch_data(engine, table_name, start_time=None, end_time=None, limit=None):
     """
-    Fetch records from the table based on the last processed timestamp.
-    If last_processed_timestamp is None, fetch records from the last NUM_DAYS_BACK days.
+    Fetch records from the table based on the specified time range.
+    If start_time and end_time are provided, fetch records within that range.
+    If only start_time is provided, fetch records from start_time onwards.
+    If neither is provided, fetch records from the last NUM_DAYS_BACK days.
     """
     try:
-        if last_processed_timestamp:
-            query = text(f"SELECT * FROM {table_name} WHERE timestamp > :last_timestamp ORDER BY timestamp ASC")
-            params = {'last_timestamp': last_processed_timestamp}
+        if start_time and end_time:
+            query = text(f"""
+                SELECT *
+                FROM {table_name}
+                WHERE timestamp BETWEEN :start_time AND :end_time
+                ORDER BY timestamp ASC
+            """)
+            params = {'start_time': start_time, 'end_time': end_time}
+        elif start_time:
+            query = text(f"""
+                SELECT *
+                FROM {table_name}
+                WHERE timestamp >= :start_time
+                ORDER BY timestamp ASC
+            """)
+            params = {'start_time': start_time}
         else:
             # Fetch records within the last NUM_DAYS_BACK days if no timestamp is set
             num_days = NUM_DAYS_BACK
             query = text(
-                f"SELECT * FROM {table_name} WHERE timestamp >= NOW() - INTERVAL '{num_days} days' ORDER BY timestamp ASC")
+                f"SELECT * FROM {table_name} WHERE timestamp >= NOW() - INTERVAL '{num_days} days' ORDER BY timestamp ASC"
+            )
             params = {}
 
         if limit:
@@ -113,7 +129,7 @@ def fetch_data(engine, table_name, last_processed_timestamp=None, limit=None):
             params['limit'] = limit
 
         df = pd.read_sql(query, engine, params=params, parse_dates=['timestamp'])
-        logger.info(f"Fetched {len(df)} new records from {table_name}.")
+        logger.info(f"Fetched {len(df)} records from {table_name}.")
         return df
     except Exception as e:
         logger.error(f"Error fetching data from {table_name}: {e}")

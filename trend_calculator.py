@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler
 from logger import logger
-from config import TREND_PARAMETERS, NUM_OF_EPOCHS
+from config import TREND_PARAMETERS, NUM_OF_EPOCHS, EARLY_STOPPING_PATIENCE
 from tqdm import tqdm
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
@@ -30,24 +30,37 @@ class TimeSeriesDataset(Dataset):
 
 
 class LSTMModelWithAttention(nn.Module):
-    def __init__(self, input_size=6, hidden_size=128, num_layers=3, bidirectional=True):
+    def __init__(self, input_size=6, hidden_size=128, num_layers=3, num_transformer_layers=2, dropout=0.3,
+                 bidirectional=True):
         """
         input_size: Number of input features per timestep.
         hidden_size: Number of features in the hidden state.
         num_layers: Number of recurrent layers.
+        num_transformer_layers: Number of transformer layers.
+        dropout: Dropout rate.
         bidirectional: If True, use bidirectional LSTM.
         """
         super(LSTMModelWithAttention, self).__init__()
         self.lstm = nn.LSTM(
-            input_size, hidden_size, num_layers, batch_first=True, dropout=0.3, bidirectional=bidirectional
+            input_size, hidden_size, num_layers, batch_first=True, dropout=dropout, bidirectional=bidirectional
         )
         direction_multiplier = 2 if bidirectional else 1
         self.attention = nn.Linear(hidden_size * direction_multiplier, 1)
         self.fc = nn.Linear(hidden_size * direction_multiplier, 1)
+        self.transformer_layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(d_model=hidden_size * direction_multiplier, nhead=8)
+            for _ in range(num_transformer_layers)
+        ])
 
     def forward(self, x):
         # x shape: [batch_size, sequence_length, input_size]
         lstm_out, _ = self.lstm(x)  # [batch_size, sequence_length, hidden_size * direction_multiplier]
+
+        # Pass through transformer layers
+        for transformer in self.transformer_layers:
+            # Transformer expects input of shape [sequence_length, batch_size, features]
+            lstm_out = transformer(lstm_out.permute(1, 0, 2)).permute(1, 0, 2)
+
         # Apply attention
         attention_weights = torch.softmax(self.attention(lstm_out), dim=1)  # [batch_size, sequence_length, 1]
         context = torch.sum(attention_weights * lstm_out, dim=1)  # [batch_size, hidden_size * direction_multiplier]
@@ -61,12 +74,22 @@ def calculate_technical_indicators(df):
     return df
 
 
-def train_model(model, train_loader, val_loader, model_path, epochs=NUM_OF_EPOCHS, device='cpu', early_stopping_patience=5):
+def train_model(model, train_loader, val_loader, model_path, epochs=NUM_OF_EPOCHS, device='cpu',
+                early_stopping_patience=EARLY_STOPPING_PATIENCE, dynamic_lr=False):
     """
     Train the model and save the best performing model based on validation loss.
+    Includes optional dynamic learning rate scheduling.
     """
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+
+    # Learning rate scheduler
+    if dynamic_lr:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5,
+                                                               verbose=True)
+    else:
+        scheduler = None
+
     model.train()
     best_loss = float('inf')
     patience_counter = 0
@@ -74,8 +97,13 @@ def train_model(model, train_loader, val_loader, model_path, epochs=NUM_OF_EPOCH
     for epoch in range(epochs):
         epoch_loss = 0.0
         logger.info(f"Training Epoch [{epoch + 1}/{epochs}]")
+
+        # Calculate total steps to determine update frequency
+        total_steps = len(train_loader)
+        update_every = max(1, total_steps // 10)  # Update every 10%
+
         with tqdm(train_loader, desc=f"Epoch [{epoch + 1}/{epochs}] (Training)", leave=False) as t:
-            for x, y in t:
+            for step, (x, y) in enumerate(t):
                 x = x.float().to(device)
                 y = y.float().to(device)
 
@@ -89,7 +117,9 @@ def train_model(model, train_loader, val_loader, model_path, epochs=NUM_OF_EPOCH
                 optimizer.step()
                 epoch_loss += loss.item()
 
-                t.set_postfix(loss=loss.item())
+                # Update progress bar every 10%
+                if (step + 1) % update_every == 0 or (step + 1) == total_steps:
+                    t.set_postfix(loss=loss.item())
 
         avg_train_loss = epoch_loss / len(train_loader)
         logger.info(f"Epoch [{epoch + 1}/{epochs}], Training Average Loss: {avg_train_loss:.6f}")
@@ -99,7 +129,7 @@ def train_model(model, train_loader, val_loader, model_path, epochs=NUM_OF_EPOCH
         val_loss = 0.0
         with torch.no_grad():
             with tqdm(val_loader, desc=f"Epoch [{epoch + 1}/{epochs}] (Validation)", leave=False) as t_val:
-                for x_val, y_val in t_val:
+                for step, (x_val, y_val) in enumerate(t_val):
                     x_val = x_val.float().to(device)
                     y_val = y_val.float().to(device)
 
@@ -110,10 +140,16 @@ def train_model(model, train_loader, val_loader, model_path, epochs=NUM_OF_EPOCH
                     loss_val = criterion(outputs_val, y_val)
                     val_loss += loss_val.item()
 
-                    t_val.set_postfix(loss=loss_val.item())
+                    # Update progress bar every 10%
+                    if (step + 1) % update_every == 0 or (step + 1) == len(val_loader):
+                        t_val.set_postfix(loss=loss_val.item())
 
         avg_val_loss = val_loss / len(val_loader)
         logger.info(f"Epoch [{epoch + 1}/{epochs}], Validation Average Loss: {avg_val_loss:.6f}")
+
+        # Step the scheduler if using dynamic learning rate
+        if scheduler:
+            scheduler.step(avg_val_loss)
 
         # Early Stopping Check
         if avg_val_loss < best_loss:
@@ -213,7 +249,7 @@ def detect_trends(df, frequency, lower_freq_data=None, perform_ttt=True):
     Detect trends and predict closing prices using an LSTM model.
     """
     logger.info("Trends being detected...")
-    model_path = f"models/lstm_model_{frequency}.pt"
+    model_path = f"lstm_model_{frequency}.pt"
 
     # Ensure 'timestamp' is datetime and set as index
     if 'timestamp' in df.columns:
@@ -250,11 +286,11 @@ def detect_trends(df, frequency, lower_freq_data=None, perform_ttt=True):
     sequences = []
     targets = []
     for i in range(len(scaled_features) - sequence_length):
-        sequences.append(scaled_features[i:i+sequence_length])
-        targets.append(scaled_features[i+sequence_length][0])  # 'close' is the target
+        sequences.append(scaled_features[i:i + sequence_length])
+        targets.append(scaled_features[i + sequence_length][0])  # 'close' is the target
 
     sequences = np.array(sequences)  # Shape: [num_samples, sequence_length, input_size]
-    targets = np.array(targets)      # Shape: [num_samples, ]
+    targets = np.array(targets)  # Shape: [num_samples, ]
 
     dataset = TimeSeriesDataset(torch.Tensor(sequences), torch.Tensor(targets))
 
@@ -288,14 +324,17 @@ def detect_trends(df, frequency, lower_freq_data=None, perform_ttt=True):
 
     if not os.path.exists(model_path) or not model_loaded:
         logger.info(f"Training new model for {frequency}.")
-        train_model(model, train_loader, val_loader, model_path, epochs=20, device=device, early_stopping_patience=5)
+        train_model(model, train_loader, val_loader, model_path, epochs=20, device=device, early_stopping_patience=5,
+                    dynamic_lr=True)
 
     # Implement Test-Time Training (TTT) always
     if perform_ttt:
         logger.info("Starting Test-Time Training (TTT)...")
         # Prepare TTT data (using the entire dataset for TTT)
         ttt_loader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=0)
-        train_model(model, ttt_loader, val_loader, model_path, epochs=10, device=device, early_stopping_patience=3)
+        # Train with TTT-specific parameters
+        train_model(model, ttt_loader, val_loader, model_path, epochs=10, device=device, early_stopping_patience=3,
+                    dynamic_lr=True)
         logger.info("Test-Time Training (TTT) completed.")
 
     # Predictions
@@ -350,7 +389,8 @@ def detect_trend_shifts(df, frequency):
     short_window = params.get('short_window', 10)
     long_window = params.get('long_window', 50)
 
-    logger.debug(f"Detecting trends for frequency {frequency} with short_window={short_window} and long_window={long_window}")
+    logger.debug(
+        f"Detecting trends for frequency {frequency} with short_window={short_window} and long_window={long_window}")
 
     # Calculate short-term and long-term SMA
     df['short_sma'] = df['sma'].rolling(window=short_window, min_periods=1).mean()
