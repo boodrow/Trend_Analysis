@@ -3,10 +3,12 @@
 import sqlalchemy
 from sqlalchemy import create_engine, text
 import pandas as pd
-from config import DATABASE, NUM_DAYS_BACK
+from config import DATABASE, NUM_DAYS_BACK, TIMESTAMP_DIR, FLOAT_TOLERANCE, BATCH_UPDATE
 from logger import logger
 import urllib.parse
 import time
+import os
+import pickle
 
 
 def get_connection(max_retries=5, initial_delay=2):
@@ -39,70 +41,22 @@ def get_connection(max_retries=5, initial_delay=2):
     raise ConnectionError("Failed to connect to the database after multiple attempts.")
 
 
-def initialize_last_processed_table(engine):
+def fetch_data(engine, table_name, columns='*', start_time=None, end_time=None, limit=None):
     """
-    Initializes the 'last_processed' table if it does not exist.
-    """
-    try:
-        # Use engine.begin() to start a transaction
-        with engine.begin() as conn:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS last_processed (
-                    frequency VARCHAR(10) PRIMARY KEY,
-                    last_timestamp TIMESTAMP WITH TIME ZONE
-                );
-            """))
-        logger.info("Ensured 'last_processed' table exists.")
-    except Exception as e:
-        logger.error(f"Error initializing 'last_processed' table: {e}")
-
-
-def get_last_processed_timestamp(engine, frequency):
-    """
-    Retrieves the last processed timestamp for a given frequency.
+    Fetch records from the table based on the specified time range and columns.
+    If columns='*', fetch all columns.
     """
     try:
-        query = text("SELECT last_timestamp FROM last_processed WHERE frequency = :frequency")
-        with engine.connect() as connection:
-            result = connection.execute(query, {'frequency': frequency}).fetchone()
-            if result:
-                return result[0]
-            else:
-                return None
-    except Exception as e:
-        logger.error(f"Error fetching last processed timestamp for {frequency}: {e}")
-        return None
+        if isinstance(columns, list):
+            columns = ', '.join(columns)
+        elif isinstance(columns, str) and columns != '*':
+            columns = columns
+        else:
+            columns = '*'
 
-
-def update_last_processed_timestamp(engine, frequency, timestamp):
-    """
-    Updates the last processed timestamp for a given frequency.
-    """
-    try:
-        query = text("""
-            INSERT INTO last_processed (frequency, last_timestamp)
-            VALUES (:frequency, :last_timestamp)
-            ON CONFLICT (frequency) DO UPDATE SET last_timestamp = :last_timestamp
-        """)
-        # Use engine.begin() to start a transaction
-        with engine.begin() as connection:
-            connection.execute(query, {'frequency': frequency, 'last_timestamp': timestamp})
-        logger.info(f"Persisted last processed timestamp for {frequency}: {timestamp}")
-    except Exception as e:
-        logger.error(f"Error updating last processed timestamp for {frequency}: {e}")
-
-
-def fetch_data(engine, table_name, start_time=None, end_time=None, limit=None):
-    """
-    Fetch records from the table based on the specified time range.
-    If start_time and end_time are provided, fetch records within that range.
-    If only start_time is provided, fetch records from start_time onwards.
-    If neither is provided, fetch records from the last NUM_DAYS_BACK days.
-    """
-    try:
         if start_time and end_time:
             query = text(f"""
-                SELECT *
+                SELECT {columns}
                 FROM {table_name}
                 WHERE timestamp BETWEEN :start_time AND :end_time
                 ORDER BY timestamp ASC
@@ -110,17 +64,17 @@ def fetch_data(engine, table_name, start_time=None, end_time=None, limit=None):
             params = {'start_time': start_time, 'end_time': end_time}
         elif start_time:
             query = text(f"""
-                SELECT *
+                SELECT {columns}
                 FROM {table_name}
                 WHERE timestamp >= :start_time
                 ORDER BY timestamp ASC
             """)
             params = {'start_time': start_time}
         else:
-            # Fetch records within the last NUM_DAYS_BACK days if no timestamp is set
+            # Fetch records within the last NUM_DAYS_back days if no timestamp is set
             num_days = NUM_DAYS_BACK
             query = text(
-                f"SELECT * FROM {table_name} WHERE timestamp >= NOW() - INTERVAL '{num_days} days' ORDER BY timestamp ASC"
+                f"SELECT {columns} FROM {table_name} WHERE timestamp >= NOW() - INTERVAL '{num_days} days' ORDER BY timestamp ASC"
             )
             params = {}
 
@@ -141,7 +95,7 @@ def ensure_columns(engine, table_name, columns):
     Ensure that specified columns exist in the database table.
     """
     try:
-        with engine.begin() as conn:
+        with engine.connect() as conn:
             # Get existing columns in the table
             result = conn.execute(
                 text("""
@@ -164,47 +118,116 @@ def ensure_columns(engine, table_name, columns):
         logger.error(f"Error ensuring columns in table {table_name}: {e}")
 
 
-def update_trends(engine, table_name, df):
+def update_trends(engine, table_name, df, freq):
     """
-    Bulk update the 'trend' and 'predicted_close' columns in the database based on the DataFrame.
-    Expects 'timestamp' as a column in df.
+    Update the 'trend', 'predicted_close', 'sma', and 'ema' columns in the database based on the DataFrame.
+    Updates are performed in batches to ensure efficiency.
     """
     try:
-        if not {'trend', 'predicted_close', 'timestamp'}.issubset(df.columns):
-            missing_cols = {'trend', 'predicted_close', 'timestamp'}.difference(df.columns)
+        required_columns = {'trend', 'predicted_close', 'sma', 'ema', 'timestamp'}
+        if not required_columns.issubset(df.columns):
+            missing_cols = required_columns - set(df.columns)
             logger.warning(f"Missing columns {missing_cols} in dataframe for {table_name}.")
             return
-        df_to_update = df[['timestamp', 'trend', 'predicted_close']]
+
+        df_to_update = df[['timestamp', 'trend', 'predicted_close', 'sma', 'ema']].copy()
         if df_to_update.empty:
-            logger.info(f"No 'trend' or 'predicted_close' data to update for {table_name}.")
+            logger.info(f"No 'trend', 'predicted_close', 'sma', or 'ema' data to update for {table_name}.")
             return
-        # Convert 'timestamp' to string if necessary
-        if df_to_update['timestamp'].dtype == 'datetime64[ns, UTC]':
-            df_to_update['timestamp'] = df_to_update['timestamp'].dt.tz_convert(None).astype(str)
-        elif df_to_update['timestamp'].dtype == 'datetime64[ns]':
-            df_to_update['timestamp'] = df_to_update['timestamp'].astype(str)
-        with engine.begin() as conn:
-            # Create a temporary table
-            conn.execute(text("DROP TABLE IF EXISTS temp_trends"))
-            conn.execute(text("""
-                CREATE TEMPORARY TABLE temp_trends (
-                    timestamp TEXT,
-                    trend TEXT,
-                    predicted_close REAL
-                )
-            """))
-            # Insert data into temporary table
-            df_to_update.to_sql('temp_trends', conn, if_exists='append', index=False)
-            # Update the original table using the temporary table
-            conn.execute(text(f"""
-                UPDATE {table_name}
-                SET trend = temp_trends.trend,
-                    predicted_close = temp_trends.predicted_close
-                FROM temp_trends
-                WHERE {table_name}.timestamp::text = temp_trends.timestamp
-            """))
-            # Drop the temporary table
-            conn.execute(text("DROP TABLE IF EXISTS temp_trends"))
-        logger.info(f"Bulk updated 'trend' and 'predicted_close' columns in {table_name}.")
+
+        # Ensure 'timestamp' is timezone-aware and in UTC
+        if df_to_update['timestamp'].dt.tz is None:
+            df_to_update['timestamp'] = df_to_update['timestamp'].dt.tz_localize('UTC')
+        else:
+            df_to_update['timestamp'] = df_to_update['timestamp'].dt.tz_convert('UTC')
+
+        # Sort by timestamp to ensure consistent order
+        df_to_update.sort_values('timestamp', inplace=True)
+
+        # Ensure 'timestamp's are unique
+        if df_to_update['timestamp'].duplicated().any():
+            logger.warning(f"Duplicate 'timestamp's found in DataFrame for {table_name}. Removing duplicates.")
+            df_to_update = df_to_update.drop_duplicates(subset=['timestamp'])
+
+        total_records = len(df_to_update)
+        batches = [df_to_update.iloc[i:i + BATCH_UPDATE] for i in range(0, total_records, BATCH_UPDATE)]
+        updated_records = 0
+
+        with engine.connect() as conn:
+            trans = conn.begin()
+            try:
+                for batch_num, batch in enumerate(batches, start=1):
+                    update_query = text(f"""
+                        UPDATE {table_name}
+                        SET trend = :trend,
+                            predicted_close = :predicted_close,
+                            sma = :sma,
+                            ema = :ema
+                        WHERE timestamp = :timestamp
+                    """)
+
+                    update_data = batch.to_dict(orient='records')
+                    result = conn.execute(update_query, update_data)
+                    updated_records += result.rowcount
+                    logger.debug(f"Batch {batch_num}: Updated {result.rowcount} records.")
+
+                # Verification step using count method inside the same transaction
+                try:
+                    # Define the time range based on the DataFrame
+                    start_time = df_to_update['timestamp'].min()
+                    end_time = df_to_update['timestamp'].max()
+
+                    verification_query = text(f"""
+                        SELECT COUNT(*) as count
+                        FROM {table_name}
+                        WHERE timestamp BETWEEN :start_time AND :end_time
+                          AND trend IS NOT NULL
+                          AND predicted_close IS NOT NULL
+                          AND sma IS NOT NULL
+                          AND ema IS NOT NULL
+                    """)
+
+                    result = conn.execute(verification_query,
+                                          {'start_time': start_time, 'end_time': end_time}).fetchone()
+
+                    # Access the count based on the result type
+                    if isinstance(result, tuple):
+                        non_null_count = result[0] if result else 0
+                    elif hasattr(result, 'count'):
+                        non_null_count = result.count if result else 0
+                    elif isinstance(result, dict):
+                        non_null_count = result['count'] if result else 0
+                    else:
+                        logger.error(f"Unexpected result type: {type(result)}")
+                        non_null_count = 0
+
+                    if non_null_count < updated_records:
+                        logger.error(
+                            f"Verification failed: Expected at least {updated_records} non-NULL records, found {non_null_count}.")
+                        raise ValueError(
+                            f"Verification failed: Expected at least {updated_records} non-NULL records, found {non_null_count}.")
+                    elif non_null_count > updated_records:
+                        logger.warning(
+                            f"Verification: Expected {updated_records} non-NULL records, but found {non_null_count}. Some records may have been previously updated.")
+                        # Decide whether to raise an error or not based on acceptable discrepancy
+                        # For now, we'll log a warning and not raise an error
+                    else:
+                        logger.info(
+                            f"Verification successful: {non_null_count} non-NULL records updated in {table_name}.")
+
+                except Exception as e:
+                    logger.error(f"Error during verification for table {table_name}: {e}")
+                    raise
+
+                trans.commit()
+                logger.info(
+                    f"Successfully updated 'trend', 'predicted_close', 'sma', and 'ema' in {table_name} for {updated_records} records.")
+
+            except Exception as e:
+                trans.rollback()
+                logger.error(f"Error during batch updates in table {table_name}: {e}")
+                raise
+
     except Exception as e:
         logger.error(f"Error updating trends in table {table_name}: {e}")
+        raise  # Re-raise the exception to stop the program as per requirement

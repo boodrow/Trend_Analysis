@@ -16,6 +16,7 @@ import sys
 # Suppress DeprecationWarnings related to numpy.core.numeric
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+
 def load_data(data_dir='data'):
     """
     Loads data for all frequencies from pickle files.
@@ -48,6 +49,7 @@ def load_data(data_dir='data'):
         except Exception as e:
             logger.error(f"Error loading data from '{file_path}': {e}")
     return data
+
 
 def process_and_train(data, model_dir='.'):
     """
@@ -148,6 +150,7 @@ def process_and_train(data, model_dir='.'):
         except Exception as e:
             logger.error(f"Error processing and training for frequency '{freq}': {e}")
 
+
 def main():
     """
     Main function to execute the data processing and model training.
@@ -163,6 +166,7 @@ def main():
     except Exception as e:
         logger.critical(f"Fatal error in data_processor_cadence.py: {e}")
         sys.exit(1)
+
 
 if __name__ == '__main__':
     main()

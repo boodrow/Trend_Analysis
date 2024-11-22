@@ -1,5 +1,8 @@
 # config.py
 
+import json
+import os
+
 DATABASE = {
     'HOST': '192.168.0.102',
     'PORT': '5432',
@@ -22,30 +25,28 @@ WEB_APP = {
     'PORT': 8050,
 }
 
-NUM_DAYS_BACK = 2
-NUM_OF_EPOCHS = 100
-EARLY_STOPPING_PATIENCE = 20
+NUM_DAYS_BACK = 180
+NUM_OF_EPOCHS = 25
+EARLY_STOPPING_PATIENCE = 10
 TTT_INTERVAL = 300
+PERFORM_TTT = False
+FLOAT_TOLERANCE = 1e-4
+BATCH_UPDATE = 100 # Batch size for database updates
 
 GLOBAL_VARIABLES = {
-    'LAST_PROCESSED_TIMESTAMP': {
-        '1S': None,
-        '1M': None,
-        '5M': None,
-        '15M': None,
-        '30M': None,
-        '1H': None,
-        '1D': None,
-    },
     'latest_logs': '',
 }
 
 TREND_PARAMETERS = {
-    '1S': {'short_window': 5, 'long_window': 20},
-    '1M': {'short_window': 10, 'long_window': 50},
-    '5M': {'short_window': 10, 'long_window': 50},
-    '15M': {'short_window': 10, 'long_window': 50},
-    '30M': {'short_window': 5, 'long_window': 20},
-    '1H': {'short_window': 5, 'long_window': 20},
-    '1D': {'short_window': 5, 'long_window': 20},
+    '1S': {'short_window': 5, 'long_window': 20, 'num_layers': 2, 'hidden_size': 64, 'num_transformer_layers': 1},
+    '1M': {'short_window': 10, 'long_window': 50, 'num_layers': 2, 'hidden_size': 64, 'num_transformer_layers': 1},
+    '5M': {'short_window': 10, 'long_window': 50, 'num_layers': 2, 'hidden_size': 64, 'num_transformer_layers': 1},
+    '15M': {'short_window': 10, 'long_window': 50, 'num_layers': 2, 'hidden_size': 64, 'num_transformer_layers': 1},
+    '30M': {'short_window': 5, 'long_window': 20, 'num_layers': 2, 'hidden_size': 64, 'num_transformer_layers': 1},
+    '1H': {'short_window': 5, 'long_window': 20, 'num_layers': 2, 'hidden_size': 64, 'num_transformer_layers': 1},
+    '1D': {'short_window': 5, 'long_window': 20, 'num_layers': 2, 'hidden_size': 64, 'num_transformer_layers': 1},
 }
+
+# Directory to store last processed timestamps
+TIMESTAMP_DIR = 'last_processed_timestamps'
+os.makedirs(TIMESTAMP_DIR, exist_ok=True)

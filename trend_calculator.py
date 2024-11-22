@@ -8,10 +8,11 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler
 from logger import logger
-from config import TREND_PARAMETERS, NUM_OF_EPOCHS, EARLY_STOPPING_PATIENCE
+from config import TREND_PARAMETERS, NUM_OF_EPOCHS, EARLY_STOPPING_PATIENCE, FLOAT_TOLERANCE
 from tqdm import tqdm
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
+import pickle
 
 torch.set_num_threads(1)
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
@@ -30,7 +31,7 @@ class TimeSeriesDataset(Dataset):
 
 
 class LSTMModelWithAttention(nn.Module):
-    def __init__(self, input_size=6, hidden_size=128, num_layers=3, num_transformer_layers=2, dropout=0.3,
+    def __init__(self, input_size=9, hidden_size=128, num_layers=3, num_transformer_layers=2, dropout=0.3,
                  bidirectional=True):
         """
         input_size: Number of input features per timestep.
@@ -74,19 +75,19 @@ def calculate_technical_indicators(df):
     return df
 
 
-def train_model(model, train_loader, val_loader, model_path, epochs=NUM_OF_EPOCHS, device='cpu',
+def train_model(model, train_loader, val_loader, model_path, scaler_path, epochs=NUM_OF_EPOCHS, device='cpu',
                 early_stopping_patience=EARLY_STOPPING_PATIENCE, dynamic_lr=False):
     """
     Train the model and save the best performing model based on validation loss.
     Includes optional dynamic learning rate scheduling.
+    Also saves the scaler for inverse transformation.
     """
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
 
     # Learning rate scheduler
     if dynamic_lr:
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5,
-                                                               verbose=True)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5)
     else:
         scheduler = None
 
@@ -169,6 +170,9 @@ def train_model(model, train_loader, val_loader, model_path, epochs=NUM_OF_EPOCH
 
         model.train()
 
+    # Save the scaler (if not already saved elsewhere)
+    # This should be handled outside of train_model, as scalers are related to data preprocessing
+
 
 def get_sequence_length(frequency):
     """
@@ -208,10 +212,10 @@ def aggregate_lower_freq_data(df_main, lower_freq_df, frequency):
         window = '30Min'
     elif frequency == '1H':
         # Use 15M data within the 1H period
-        window = '1h'  # Changed 'H' to 'h'
+        window = '1H'  # Corrected to uppercase 'H'
     elif frequency == '1D':
         # Use 1H data within the 1D period
-        window = '1d'
+        window = '1D'
     else:
         window = None
 
@@ -242,141 +246,6 @@ def aggregate_lower_freq_data(df_main, lower_freq_df, frequency):
             df_main['lower_avg_predicted_close'] = 0.0
 
     return df_main
-
-
-def detect_trends(df, frequency, lower_freq_data=None, perform_ttt=True):
-    """
-    Detect trends and predict closing prices using an LSTM model.
-    """
-    logger.info("Trends being detected...")
-    model_path = f"lstm_model_{frequency}.pt"
-
-    # Ensure 'timestamp' is datetime and set as index
-    if 'timestamp' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df.set_index('timestamp', inplace=True)
-    else:
-        logger.error("DataFrame does not contain 'timestamp' column.")
-        return df
-
-    # Use all available data
-    logger.info(f"Data used for trend detection: {len(df)} records.")
-
-    sequence_length = get_sequence_length(frequency)
-    if len(df) < sequence_length + 1:
-        logger.warning(f"Not enough data to create sequences for trend detection for {frequency}.")
-        df['predicted_close'] = np.nan
-        df['trend'] = 'STABLE'
-        df.reset_index(inplace=True)
-        return df
-
-    # Prepare data
-    df = calculate_technical_indicators(df)
-
-    # Aggregate lower frequency data to create additional features
-    df = aggregate_lower_freq_data(df, lower_freq_data, frequency)
-
-    # Select features for the model
-    feature_columns = ['close', 'sma', 'ema', 'lower_up_count', 'lower_down_count', 'lower_avg_predicted_close']
-    df = df.dropna(subset=feature_columns)  # Drop rows with NaN in feature columns
-
-    scaler = MinMaxScaler()
-    scaled_features = scaler.fit_transform(df[feature_columns])
-
-    sequences = []
-    targets = []
-    for i in range(len(scaled_features) - sequence_length):
-        sequences.append(scaled_features[i:i + sequence_length])
-        targets.append(scaled_features[i + sequence_length][0])  # 'close' is the target
-
-    sequences = np.array(sequences)  # Shape: [num_samples, sequence_length, input_size]
-    targets = np.array(targets)  # Shape: [num_samples, ]
-
-    dataset = TimeSeriesDataset(torch.Tensor(sequences), torch.Tensor(targets))
-
-    # Split into training and validation sets
-    X_train, X_val, y_train, y_val = train_test_split(sequences, targets, test_size=0.2, shuffle=False)
-
-    train_dataset = TimeSeriesDataset(torch.Tensor(X_train), torch.Tensor(y_train))
-    val_dataset = TimeSeriesDataset(torch.Tensor(X_val), torch.Tensor(y_val))
-
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=0)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = LSTMModelWithAttention(input_size=6).to(device)
-
-    # Try to load the existing model
-    model_loaded = False
-    try:
-        if os.path.exists(model_path):
-            model.load_state_dict(torch.load(model_path, map_location=device))
-            logger.info(f"Loaded pre-trained model for {frequency} from {model_path}")
-            model_loaded = True
-    except (FileNotFoundError, RuntimeError) as e:
-        # Handle size mismatch or other loading errors
-        logger.warning(f"Could not load model for {frequency}: {e}")
-        if isinstance(e, RuntimeError) and 'size mismatch' in str(e):
-            # Delete the incompatible model file
-            os.remove(model_path)
-            logger.info(f"Deleted incompatible model file: {model_path}")
-        model_loaded = False
-
-    if not os.path.exists(model_path) or not model_loaded:
-        logger.info(f"Training new model for {frequency}.")
-        train_model(model, train_loader, val_loader, model_path, epochs=20, device=device, early_stopping_patience=5,
-                    dynamic_lr=True)
-
-    # Implement Test-Time Training (TTT) always
-    if perform_ttt:
-        logger.info("Starting Test-Time Training (TTT)...")
-        # Prepare TTT data (using the entire dataset for TTT)
-        ttt_loader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=0)
-        # Train with TTT-specific parameters
-        train_model(model, ttt_loader, val_loader, model_path, epochs=10, device=device, early_stopping_patience=3,
-                    dynamic_lr=True)
-        logger.info("Test-Time Training (TTT) completed.")
-
-    # Predictions
-    logger.debug("Starting prediction...")
-    predictions = []
-    model.eval()
-    with torch.no_grad():
-        for x, _ in DataLoader(dataset, batch_size=64, shuffle=False, num_workers=0):
-            x = x.float().to(device)
-            output = model(x)
-            predictions.extend(output.squeeze().cpu().tolist())
-
-    # Inverse transform predictions
-    # Since we scaled all features, we need to invert only the 'close' feature
-    scaler_inverse = MinMaxScaler()
-    scaler_inverse.min_ = scaler.min_[0]
-    scaler_inverse.scale_ = scaler.scale_[0]
-    predictions = scaler_inverse.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
-    df = df.iloc[sequence_length:].copy()
-    df['predicted_close'] = predictions
-
-    # Add logging to check predictions
-    logger.debug(f"Sample actual close prices: {df['close'].values[:5]}")
-    logger.debug(f"Sample predicted close prices: {df['predicted_close'].values[:5]}")
-    logger.debug(f"Predictions variance: {np.var(predictions)}")
-
-    # Calculate MAE
-    mae = mean_absolute_error(df['close'], df['predicted_close'])
-    logger.info(f"Mean Absolute Error for {frequency}: {mae}")
-
-    # Determine trends using SMA crossover
-    df['trend'] = detect_trend_shifts(df, frequency)
-
-    # Validate trends
-    df = validate_trends(df, frequency)
-
-    logger.info("Trends detected.")
-
-    # Reset index to include 'timestamp' as a column before returning
-    df.reset_index(inplace=True)
-
-    return df
 
 
 def detect_trend_shifts(df, frequency):
@@ -417,7 +286,7 @@ def detect_trend_shifts(df, frequency):
         'trend'
     ] = 'DOWN'
 
-    # Remove 'STABLE' trends as per requirement (Do not include in Dash charts)
+    # Remove 'STABLE' trends as per requirement (Do Not include in Dash charts)
     df['trend'] = df['trend'].replace('STABLE', np.nan)
 
     # Drop intermediate SMA columns
@@ -434,6 +303,202 @@ def validate_trends(df, frequency):
     logger.info(f"Validating {frequency} Trends...")
     # Implement your own validation logic here if needed
     invalid_trend_count = df['trend'].isna().sum()
-    logger.debug(f"Total invalid trends detected for frequency {frequency}: {invalid_trend_count}")
+    logger.debug(f"Total trends detected for frequency {frequency}: {invalid_trend_count}")
     logger.info("Trends detected and validated.")
     return df
+
+
+def detect_trends(df, frequency, lower_freq_data=None, perform_ttt=True):
+    """
+    Detect trends and predict closing prices using an LSTM model.
+    """
+    logger.info("Trends being detected...")
+    model_path = os.path.join('models', f"lstm_model_{frequency}.pt")
+    scaler_close_path = os.path.join('models', f"scaler_close_{frequency}.pkl")
+    scaler_other_path = os.path.join('models', f"scaler_other_{frequency}.pkl")
+
+    # Ensure 'timestamp' is datetime
+    if 'timestamp' in df.columns:
+        logger.debug('timestamp column detected before prediction')
+        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+        df.dropna(subset=['timestamp'], inplace=True)  # Remove rows with invalid timestamps
+    else:
+        logger.error("DataFrame does not contain 'timestamp' column.")
+        return pd.DataFrame()  # Return empty DataFrame
+
+    # Use all available data
+    logger.info(f"Data used for trend detection: {len(df)} records.")
+
+    sequence_length = get_sequence_length(frequency)
+    if len(df) < sequence_length + 1:
+        logger.warning(f"Not enough data to create sequences for trend detection for {frequency}.")
+        df.loc[:, 'predicted_close'] = np.nan
+        df.loc[:, 'trend'] = 'STABLE'
+        return df[['timestamp', 'trend', 'predicted_close']]
+
+    # Prepare data
+    df = calculate_technical_indicators(df)
+
+    # Aggregate lower frequency data to create additional features
+    df = aggregate_lower_freq_data(df, lower_freq_data, frequency)
+
+    # Transform 'timestamp' into numerical features
+    df['unix_timestamp'] = df['timestamp'].astype(np.int64) // 10**9  # Convert to UNIX timestamp
+    df['hour'] = df['timestamp'].dt.hour
+    df['day_of_week'] = df['timestamp'].dt.dayofweek
+
+    # Select features for the model, including transformed timestamp
+    feature_columns = ['unix_timestamp', 'hour', 'day_of_week', 'close', 'sma', 'ema', 'lower_up_count', 'lower_down_count', 'lower_avg_predicted_close']
+    df = df.dropna(subset=feature_columns)  # Drop rows with NaN in feature columns
+
+    # Separate 'close' scaler and other features scaler
+    close_scaler = MinMaxScaler()
+    scaled_close = close_scaler.fit_transform(df[['close']])
+
+    other_feature_columns = ['unix_timestamp', 'hour', 'day_of_week', 'sma', 'ema', 'lower_up_count', 'lower_down_count', 'lower_avg_predicted_close']
+    other_scaler = MinMaxScaler()
+    scaled_other_features = other_scaler.fit_transform(df[other_feature_columns])
+
+    # Save scalers
+    with open(scaler_close_path, 'wb') as f:
+        pickle.dump(close_scaler, f)
+    logger.info(f"Close scaler saved to {scaler_close_path}")
+
+    with open(scaler_other_path, 'wb') as f:
+        pickle.dump(other_scaler, f)
+    logger.info(f"Other features scaler saved to {scaler_other_path}")
+
+    # Combine scaled features
+    scaled_features = np.hstack([scaled_close, scaled_other_features])
+
+    sequences = []
+    targets = []
+    for i in range(len(scaled_features) - sequence_length):
+        sequences.append(scaled_features[i:i + sequence_length])
+        targets.append(scaled_features[i + sequence_length][0])  # 'close' is the target
+
+    sequences = np.array(sequences)  # Shape: [num_samples, sequence_length, input_size]
+    targets = np.array(targets)  # Shape: [num_samples, ]
+
+    dataset = TimeSeriesDataset(torch.Tensor(sequences), torch.Tensor(targets))
+
+    # Split into training and validation sets
+    X_train, X_val, y_train, y_val = train_test_split(sequences, targets, test_size=0.2, shuffle=False)
+
+    train_dataset = TimeSeriesDataset(torch.Tensor(X_train), torch.Tensor(y_train))
+    val_dataset = TimeSeriesDataset(torch.Tensor(X_val), torch.Tensor(y_val))
+
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=0)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = LSTMModelWithAttention(input_size=9).to(device)  # Updated input_size to 9 to include new features
+
+    # Try to load the existing model
+    model_loaded = False
+    try:
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        logger.info(f"Loaded pre-trained model for {frequency} from {model_path}")
+        model_loaded = True
+    except (FileNotFoundError, RuntimeError) as e:
+        # Handle size mismatch or other loading errors
+        logger.warning(f"Could not load model for {frequency}: {e}")
+        if isinstance(e, RuntimeError) and 'size mismatch' in str(e):
+            # Delete the incompatible model file
+            if os.path.exists(model_path):
+                os.remove(model_path)
+                logger.info(f"Deleted incompatible model file: {model_path}")
+        model_loaded = False
+
+    if not model_loaded:
+        logger.info(f"Training new model for {frequency}.")
+        train_model(model, train_loader, val_loader, model_path, scaler_close_path, epochs=20, device=device,
+                    early_stopping_patience=5, dynamic_lr=True)
+
+    # Implement Test-Time Training (TTT) always
+    if perform_ttt:
+        logger.info("Starting Test-Time Training (TTT)...")
+        # Prepare TTT data (using the entire dataset for TTT)
+        ttt_loader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=0)
+        # Train with TTT-specific parameters
+        train_model(model, ttt_loader, val_loader, model_path, scaler_close_path, epochs=10, device=device,
+                    early_stopping_patience=3, dynamic_lr=True)
+        logger.info("Test-Time Training (TTT) completed.")
+
+    # Predictions
+    logger.debug("Starting prediction...")
+    predictions = []
+    model.eval()
+
+    # Load the scaler for 'close'
+    try:
+        with open(scaler_close_path, 'rb') as f:
+            close_scaler = pickle.load(f)
+        logger.info(f"Loaded close scaler from {scaler_close_path}")
+    except Exception as e:
+        logger.error(f"Error loading close scaler from {scaler_close_path}: {e}")
+        raise
+
+    with torch.no_grad():
+        for x, _ in DataLoader(dataset, batch_size=64, shuffle=False, num_workers=0):
+            x = x.float().to(device)
+            output = model(x)
+            output_list = output.squeeze().cpu().tolist()
+            if isinstance(output_list, list):
+                predictions.extend(output_list)
+            else:
+                predictions.append(output_list)  # Handle single float output
+
+    # Inverse transform predictions
+    predictions_scaled = np.array(predictions).reshape(-1, 1)
+    try:
+        predictions_original = close_scaler.inverse_transform(predictions_scaled).flatten()
+    except Exception as e:
+        logger.error(f"Error during inverse transformation of predictions: {e}")
+        raise
+
+    # Calculate the expected number of predictions
+    expected_predictions = len(df) - sequence_length
+    actual_predictions = len(predictions_original)
+
+    if actual_predictions != expected_predictions:
+        logger.error(f"Number of predictions ({actual_predictions}) does not match expected ({expected_predictions}). Adjusting predictions.")
+        # Align predictions by slicing to the expected number
+        if actual_predictions < expected_predictions:
+            # Not enough predictions; this should not happen normally
+            logger.error(f"Insufficient predictions. Expected {expected_predictions}, got {actual_predictions}. Exiting.")
+            raise ValueError("Insufficient predictions generated by the model.")
+        else:
+            predictions_original = predictions_original[:expected_predictions]
+            logger.debug(f"Truncated predictions to match expected number: {len(predictions_original)}.")
+
+    # Assign predictions to the corresponding timestamps
+    # The first 'sequence_length' records do not have predictions
+    df_with_predictions = df.iloc[sequence_length:].copy()
+    df_with_predictions.loc[:, 'predicted_close'] = np.round(predictions_original, 6)  # Round to 6 decimal places
+
+    # Add logging to check predictions
+    logger.debug(f"DataFrame columns before prediction assignment:\n{df_with_predictions.columns.tolist()}")
+    if 'timestamp' not in df_with_predictions.columns:
+        logger.error("'timestamp' column missing after assigning predictions.")
+        raise KeyError("'timestamp' column missing after assigning predictions.")
+    else:
+        logger.debug("'timestamp' column present after assigning predictions.")
+    logger.debug(f"First few rows of DataFrame for prediction assignment:\n{df_with_predictions.head()}")
+    logger.debug(f"Sample actual close prices: {df_with_predictions['close'].values[:5]}")
+    logger.debug(f"Sample predicted close prices: {df_with_predictions['predicted_close'].values[:5]}")
+    logger.debug(f"Predictions variance: {np.var(predictions_original)}")
+
+    # Calculate MAE
+    mae = mean_absolute_error(df_with_predictions['close'], df_with_predictions['predicted_close'])
+    logger.info(f"Mean Absolute Error for {frequency}: {mae}")
+
+    # Determine trends using SMA crossover
+    df_with_predictions['trend'] = detect_trend_shifts(df_with_predictions, frequency)
+
+    # Validate trends
+    df_with_predictions = validate_trends(df_with_predictions, frequency)
+
+    logger.info("Trends detected.")
+
+    return df_with_predictions[['timestamp', 'trend', 'predicted_close']]

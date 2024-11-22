@@ -29,8 +29,8 @@ def export_data():
     for freq, table in TABLE_NAMES.items():
         try:
             logger.debug(f"Starting data export for frequency: {freq}")
-            # Fetch data from the last NUM_DAYS_BACK days
-            df = fetch_data(engine, table, last_processed_timestamp=None)
+            # Fetch all columns from the last NUM_DAYS_BACK days
+            df = fetch_data(engine, table, columns='*', start_time=None, end_time=None)
             if df.empty:
                 logger.warning(f"No data fetched for frequency {freq}. Skipping export.")
                 continue
@@ -40,7 +40,7 @@ def export_data():
                 df.reset_index(inplace=True)
                 logger.debug(f"Reset index to ensure 'timestamp' is a column for frequency '{freq}'.")
 
-            # Save DataFrame as a pickle file
+            # Define the filename based on frequency
             file_path = os.path.join(data_dir, f"{table}.pkl")
             with open(file_path, 'wb') as file:
                 pickle.dump(df, file, protocol=pickle.HIGHEST_PROTOCOL)
